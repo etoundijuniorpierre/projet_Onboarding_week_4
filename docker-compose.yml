@@ -1,0 +1,136 @@
+services:
+  ### Infrastructure ###
+  postgres-db:
+    image: postgres:17
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_MULTIPLE_DATABASES: packagedb,trackingdb,checkpointdb
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongodb:
+    image: mongo:8.0
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_DATABASE: locationdb
+    volumes:
+      - mongodb-data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - app-network
+
+  axon-server:
+    image: axoniq/axonserver:latest
+    container_name: axon-server
+    hostname: axon-server
+    command: --only-master
+    ports:
+      - "8024:8024"
+      - "8124:8124"
+    volumes:
+      - axon-data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8124 || exit 1" ]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+
+  ### Services Métiers ###
+  package-service:
+    build: ./package-service
+    container_name: package-service
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      axon-server: # Ajouté pour s'assurer qu'Axon Server est là avant de démarrer
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/packagedb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: root
+      SERVER_PORT: 8080
+      AXON_AXONSERVER_SERVERS: axon-server:8024
+    ports:
+      - "8080:8080"
+    networks:
+      - app-network
+
+  location-service:
+    build: ./location-service
+    container_name: location-service
+    depends_on:
+      mongodb:
+        condition: service_started
+    environment:
+      SPRING_DATA_MONGODB_URI: mongodb://mongodb:27017/locationdb
+      SERVER_PORT: 8081
+    ports:
+      - "8081:8081"
+    networks:
+      - app-network
+
+  checkpoint-service:
+    build: ./checkpoint-service
+    container_name: security-checkpoint-service
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      location-service:
+        condition: service_started
+      axon-server: # Ajouté pour s'assurer qu'Axon Server est là avant de démarrer
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/checkpointdb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: root
+      FEIGN_CLIENT_CONFIG_DEFAULT_URL: http://location-service:8081
+      SERVER_PORT: 8082
+      AXON_AXONSERVER_SERVERS: axon-server:8024
+    ports:
+      - "8082:8082"
+    networks:
+      - app-network
+
+  tracking-service:
+    build: ./tracking-service
+    container_name: tracking-service
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      axon-server:
+        condition: service_started
+      package-service:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/trackingdb
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: root
+      AXON_AXONSERVER_SERVERS: axon-server:8024
+      SERVER_PORT: 8083
+    ports:
+      - "8083:8083"
+    networks:
+      - app-network
+
+volumes:
+  postgres-data:
+  mongodb-data:
+  axon-data:
+
+networks:
+  app-network:
+    driver: bridge
